@@ -1,0 +1,2114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VSMMC General Surgery Evaluation System</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; }
+    .score-btn { width: 32px; height: 32px; border-radius: 8px; font-weight: bold; font-size: 12px; cursor: pointer; border: none; transition: all 0.2s; }
+    .score-btn:hover { transform: scale(1.05); }
+    .score-0 { background: #d1d5db; color: #374151; }
+    .score-1 { background: #ef4444; color: white; }
+    .score-2 { background: #f97316; color: white; }
+    .score-3 { background: #eab308; color: white; }
+    .score-4 { background: #3b82f6; color: white; }
+    .score-5 { background: #10b981; color: white; }
+    .score-6 { background: #047857; color: white; }
+    .selected { transform: scale(1.1); box-shadow: 0 0 0 2px #10b981; }
+    .animate-spin { animation: spin 1s linear infinite; }
+    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+    .rubric-panel { max-height: 0; overflow: hidden; transition: max-height 0.3s ease-out; }
+    .rubric-panel.open { max-height: 500px; }
+    .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; }
+    .modal.active { display: flex; align-items: center; justify-content: center; }
+    .progress-bar { height: 8px; border-radius: 4px; background: #e2e8f0; overflow: hidden; }
+    .progress-fill { height: 100%; border-radius: 4px; transition: width 0.3s; }
+    @media print {
+      .no-print { display: none !important; }
+      .print-only { display: block !important; }
+      body { background: white; font-size: 12px; }
+      .bg-gradient-to-br { background: white !important; }
+      .bg-white { box-shadow: none !important; border: 1px solid #e2e8f0 !important; }
+      table { font-size: 11px; }
+      th, td { padding: 6px 8px !important; }
+      .rounded-xl { border-radius: 4px !important; }
+      h1, h2, h3 { margin-bottom: 8px !important; }
+      .grid { display: block !important; }
+      .grid > div { margin-bottom: 12px !important; display: inline-block; width: 48%; }
+      canvas { max-height: 250px !important; }
+    }
+    .print-only { display: none; }
+    .share-input { user-select: all; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+
+  <script>
+    // ==================== SUPABASE CONFIG ====================
+    const SUPABASE_URL = 'https://aiitrxgcdwbfaazjubic.supabase.co';
+    const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFpaXRyeGdjZHdiZmFhemp1YmljIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjgzOTY2ODYsImV4cCI6MjA4Mzk3MjY4Nn0.BesNbgPyHh9zOltvaJMWTTnzlF8fSTEEsVhKuzym47M';
+
+    // ==================== STATE ====================
+    let state = {
+      isConnected: false,
+      isLoading: true,
+      currentUser: null,
+      residents: [],
+      allResidents: [], // includes inactive/graduated
+      evaluations: [],
+      evaluators: [],
+      activeTab: 'evaluate',
+      selectedResident: '',
+      selectedQuarter: 'Q1',
+      selectedYear: new Date().getFullYear(),
+      scores: {},
+      rotation: '',
+      comments: '',
+      openSections: { clinical: true, technical: false, attitudinal: false },
+      openRubrics: {},
+      loginEmail: '',
+      loginName: '',
+      isNewUser: false,
+      filterYear: 'all',
+      filterQuarter: 'all',
+      residentFilterYear: 'all',
+      residentFilterStatus: 'active',
+      newResidentName: '',
+      newResidentYear: 1,
+      evaluationType: 'full',
+      // New states
+      viewingResident: null,
+      showResidentModal: false,
+      showAnalytics: false,
+      analyticsResident: null,
+      // Shareable link states
+      showShareModal: false,
+      shareableLink: '',
+      shareLinkCopied: false
+    };
+
+    // ==================== CONSTANTS ====================
+    const ROTATIONS = ['Q1', 'Q2', 'Q3', 'Q4'];
+    const ROTATION_LABELS = { 
+      Q1: 'January - March', 
+      Q2: 'April - June', 
+      Q3: 'July - September', 
+      Q4: 'October - December' 
+    };
+    const SCORE_LABELS = { 
+      0: 'Not Observed', 
+      1: 'Poor', 
+      2: 'Marginal', 
+      3: 'Satisfactory', 
+      4: 'Good', 
+      5: 'Very Good', 
+      6: 'Excellent' 
+    };
+    const THRESHOLD_PERCENT = 60;
+    const STATUS_LABELS = {
+      active: { label: 'Active', color: 'bg-emerald-100 text-emerald-700' },
+      graduated: { label: 'Graduated', color: 'bg-blue-100 text-blue-700' },
+      removed: { label: 'Removed', color: 'bg-red-100 text-red-700' },
+      inactive: { label: 'Inactive', color: 'bg-gray-100 text-gray-700' }
+    };
+
+    const EVALUATION_TYPES = [
+      { id: 'full', name: 'Full Quarterly Evaluation', sections: ['clinical', 'technical', 'attitudinal'] },
+      { id: 'clinical', name: 'Clinical Competence Only', sections: ['clinical'] },
+      { id: 'technical', name: 'Technical Skills Only', sections: ['technical'] },
+      { id: 'attitudinal', name: 'Attitudinal Competencies Only', sections: ['attitudinal'] }
+    ];
+
+    // ==================== RUBRIC DESCRIPTIONS ====================
+    const RUBRICS = {
+      database: {
+        6: "Excellent - Thorough and accurate history taking; complete and systematic PE; arrives at correct diagnosis consistently",
+        5: "Very Good - Comprehensive history and PE with minor omissions; usually arrives at correct diagnosis",
+        4: "Good - Adequate history and PE; generally arrives at correct diagnosis with occasional assistance",
+        3: "Satisfactory - Basic history and PE; sometimes misses important findings; needs guidance for diagnosis",
+        2: "Marginal - Incomplete history and PE; frequently misses significant findings; often incorrect diagnosis",
+        1: "Poor - Inadequate history taking and PE; fails to identify important clinical findings; incorrect diagnosis",
+        0: "Not Observed"
+      },
+      diagnostic_tests: {
+        6: "Excellent - Selects appropriate tests judiciously; interprets results accurately; correlates findings with clinical picture",
+        5: "Very Good - Generally selects appropriate tests; interprets most results correctly; good clinical correlation",
+        4: "Good - Adequate test selection; interprets common tests correctly; occasional need for assistance",
+        3: "Satisfactory - Basic understanding of test selection; sometimes orders unnecessary tests; needs help with interpretation",
+        2: "Marginal - Poor test selection; orders excessive or inappropriate tests; difficulty interpreting results",
+        1: "Poor - Fails to order necessary tests or orders inappropriate ones; cannot interpret basic results",
+        0: "Not Observed"
+      },
+      diagnosis_judgement: {
+        6: "Excellent - Accurate diagnosis; excellent clinical judgment; makes sound decisions consistently",
+        5: "Very Good - Usually accurate diagnosis; good judgment; makes appropriate decisions most of the time",
+        4: "Good - Generally accurate diagnosis; adequate judgment; occasional need for guidance in decision making",
+        3: "Satisfactory - Basic diagnostic ability; sometimes uncertain; needs supervision for complex decisions",
+        2: "Marginal - Frequently inaccurate diagnosis; poor judgment; decisions often need correction",
+        1: "Poor - Unable to arrive at correct diagnosis; poor judgment endangers patient safety",
+        0: "Not Observed"
+      },
+      treatment_management: {
+        6: "Excellent - Comprehensive pre/post-op management; anticipates complications; excellent patient care",
+        5: "Very Good - Thorough management; recognizes most complications early; very good patient care",
+        4: "Good - Adequate management; handles routine cases well; occasional need for guidance",
+        3: "Satisfactory - Basic management skills; sometimes misses early signs of complications; needs supervision",
+        2: "Marginal - Inadequate management; frequently misses complications; patient care suffers",
+        1: "Poor - Unable to manage patients properly; fails to recognize complications; endangers patient welfare",
+        0: "Not Observed"
+      },
+      oral_presentations: {
+        6: "Excellent - Clear, concise, and complete presentations; excellent communication with team and consultants",
+        5: "Very Good - Well-organized presentations; communicates effectively; minor omissions only",
+        4: "Good - Adequate presentations; communicates important information; occasional disorganization",
+        3: "Satisfactory - Basic presentation skills; sometimes incomplete; needs prompting for details",
+        2: "Marginal - Disorganized presentations; misses important information; poor communication",
+        1: "Poor - Unable to present cases coherently; fails to communicate essential information",
+        0: "Not Observed"
+      },
+      record_keeping: {
+        6: "Excellent - Complete, accurate, timely documentation; exemplary medical records",
+        5: "Very Good - Thorough documentation; minor omissions; records generally complete and timely",
+        4: "Good - Adequate documentation; occasionally incomplete; generally timely",
+        3: "Satisfactory - Basic documentation; sometimes delayed or incomplete; needs reminders",
+        2: "Marginal - Poor documentation; frequently incomplete or delayed; records often inadequate",
+        1: "Poor - Fails to document properly; records incomplete, inaccurate, or missing",
+        0: "Not Observed"
+      },
+      after_care: {
+        6: "Excellent - Comprehensive follow-up care; excellent patient education; ensures continuity of care",
+        5: "Very Good - Thorough follow-up; good patient education; reliable continuity of care",
+        4: "Good - Adequate follow-up care; provides basic patient education; generally ensures continuity",
+        3: "Satisfactory - Basic follow-up; sometimes incomplete patient education; occasional gaps in continuity",
+        2: "Marginal - Inadequate follow-up; poor patient education; frequent gaps in continuity of care",
+        1: "Poor - Fails to provide appropriate follow-up; no patient education; discontinuity of care",
+        0: "Not Observed"
+      },
+      patient_prep: {
+        6: "Excellent - Thorough patient preparation; ensures all pre-op requirements met; optimal patient condition",
+        5: "Very Good - Complete patient preparation; all requirements addressed; patient well-prepared",
+        4: "Good - Adequate preparation; minor omissions; patient generally ready for procedure",
+        3: "Satisfactory - Basic preparation; occasional omissions; sometimes needs reminders",
+        2: "Marginal - Incomplete preparation; frequently misses requirements; delays procedures",
+        1: "Poor - Fails to prepare patients properly; procedures delayed or compromised",
+        0: "Not Observed"
+      },
+      equipment_prep: {
+        6: "Excellent - All equipment ready and checked; anticipates special needs; no delays",
+        5: "Very Good - Equipment well-prepared; anticipates most needs; rare delays",
+        4: "Good - Adequate equipment preparation; occasional minor omissions; minimal delays",
+        3: "Satisfactory - Basic preparation; sometimes forgets items; occasional delays",
+        2: "Marginal - Poor equipment preparation; frequently unprepared; causes delays",
+        1: "Poor - Fails to prepare equipment; procedures significantly delayed or compromised",
+        0: "Not Observed"
+      },
+      surgical_principles: {
+        6: "Excellent - Strict adherence to surgical principles; exemplary aseptic technique; prioritizes patient safety",
+        5: "Very Good - Follows surgical principles consistently; maintains aseptic technique; safety-conscious",
+        4: "Good - Generally follows principles; occasional minor lapses; adequate safety awareness",
+        3: "Satisfactory - Basic understanding of principles; needs reminders; adequate safety practices",
+        2: "Marginal - Frequently violates principles; poor aseptic technique; safety concerns",
+        1: "Poor - Disregards surgical principles; breaks sterility; endangers patient safety",
+        0: "Not Observed"
+      },
+      technical_dexterity: {
+        6: "Excellent - Superior manual skills; precise tissue handling; smooth and efficient movements",
+        5: "Very Good - Very good manual skills; gentle tissue handling; coordinated movements",
+        4: "Good - Adequate manual skills; generally good tissue handling; competent technique",
+        3: "Satisfactory - Basic manual skills; occasionally rough tissue handling; developing technique",
+        2: "Marginal - Poor manual skills; rough tissue handling; awkward movements",
+        1: "Poor - Lacks basic manual skills; causes tissue damage; unable to perform procedures safely",
+        0: "Not Observed"
+      },
+      conduct_procedure: {
+        6: "Excellent - Systematic approach; excellent flow; handles variations expertly; minimal complications",
+        5: "Very Good - Organized approach; good flow; handles most variations well; few complications",
+        4: "Good - Adequate approach; reasonable flow; manages routine cases; occasional need for guidance",
+        3: "Satisfactory - Basic approach; sometimes disorganized; needs supervision for variations",
+        2: "Marginal - Disorganized approach; poor flow; struggles with routine procedures",
+        1: "Poor - Unable to conduct procedures properly; chaotic approach; frequent complications",
+        0: "Not Observed"
+      },
+      intraop_judgement: {
+        6: "Excellent - Excellent intra-operative decision making; anticipates problems; handles emergencies expertly",
+        5: "Very Good - Good intra-operative judgment; recognizes problems early; handles most emergencies well",
+        4: "Good - Adequate judgment; manages routine situations; needs guidance for complex decisions",
+        3: "Satisfactory - Basic judgment; sometimes slow to recognize problems; needs supervision",
+        2: "Marginal - Poor judgment; fails to recognize problems; inappropriate decisions",
+        1: "Poor - Dangerous judgment; fails to respond to emergencies; puts patients at risk",
+        0: "Not Observed"
+      },
+      postop_care: {
+        6: "Excellent - Comprehensive post-op care; anticipates complications; excellent patient outcomes",
+        5: "Very Good - Thorough post-op care; recognizes complications early; very good outcomes",
+        4: "Good - Adequate post-op care; manages routine recovery; generally good outcomes",
+        3: "Satisfactory - Basic post-op care; sometimes misses early signs; needs supervision",
+        2: "Marginal - Poor post-op care; frequently misses complications; poor outcomes",
+        1: "Poor - Fails to provide adequate post-op care; complications missed; endangers recovery",
+        0: "Not Observed"
+      },
+      duration: {
+        6: "Excellent - Optimal operative time; efficient without compromising quality or safety",
+        5: "Very Good - Appropriate operative time; efficient and safe",
+        4: "Good - Reasonable operative time; generally efficient; minor delays acceptable",
+        3: "Satisfactory - Adequate operative time; some inefficiency; occasional prolonged procedures",
+        2: "Marginal - Prolonged operative time; inefficient; affects patient safety",
+        1: "Poor - Excessively prolonged procedures; highly inefficient; compromises patient welfare",
+        0: "Not Observed"
+      },
+      intellectual_integrity: {
+        6: "Excellent - Completely honest; admits mistakes readily; seeks to learn from errors; highest ethical standards",
+        5: "Very Good - Honest and forthright; acknowledges mistakes; learns from experience",
+        4: "Good - Generally honest; admits mistakes with some hesitation; open to learning",
+        3: "Satisfactory - Basically honest; sometimes reluctant to admit mistakes; needs encouragement to learn",
+        2: "Marginal - Occasionally dishonest; avoids admitting mistakes; resistant to learning",
+        1: "Poor - Dishonest; covers up mistakes; refuses to acknowledge errors; unethical behavior",
+        0: "Not Observed"
+      },
+      moral_ethical: {
+        6: "Excellent - Highest moral and ethical standards; exemplary professional conduct; role model",
+        5: "Very Good - Strong moral and ethical values; professional conduct; respected by peers",
+        4: "Good - Good moral and ethical values; appropriate professional conduct",
+        3: "Satisfactory - Adequate moral and ethical values; generally appropriate conduct",
+        2: "Marginal - Questionable moral or ethical judgment; occasional inappropriate conduct",
+        1: "Poor - Poor moral or ethical values; inappropriate conduct; unprofessional behavior",
+        0: "Not Observed"
+      },
+      reliability: {
+        6: "Excellent - Completely reliable and responsible; always fulfills duties; dependable in all situations",
+        5: "Very Good - Very reliable; consistently fulfills responsibilities; can be counted on",
+        4: "Good - Generally reliable; fulfills most responsibilities; occasional minor lapses",
+        3: "Satisfactory - Basically reliable; sometimes needs reminders; occasional lapses in responsibility",
+        2: "Marginal - Unreliable; frequently fails to fulfill responsibilities; needs constant supervision",
+        1: "Poor - Completely unreliable; fails to fulfill duties; irresponsible behavior",
+        0: "Not Observed"
+      },
+      bedside_decorum: {
+        6: "Excellent - Exemplary bedside manner; compassionate; excellent rapport with patients and families",
+        5: "Very Good - Very good bedside manner; caring; establishes good rapport",
+        4: "Good - Good bedside manner; appropriate interactions; adequate rapport",
+        3: "Satisfactory - Acceptable bedside manner; sometimes awkward; basic rapport",
+        2: "Marginal - Poor bedside manner; insensitive; difficulty establishing rapport",
+        1: "Poor - Unacceptable bedside manner; rude or dismissive; no rapport with patients",
+        0: "Not Observed"
+      },
+      study_habits: {
+        6: "Excellent - Outstanding study habits; self-directed learner; continuously seeks knowledge",
+        5: "Very Good - Very good study habits; motivated learner; regularly updates knowledge",
+        4: "Good - Good study habits; adequate self-study; keeps up with requirements",
+        3: "Satisfactory - Basic study habits; studies when required; needs encouragement",
+        2: "Marginal - Poor study habits; rarely studies; falls behind in knowledge",
+        1: "Poor - No study habits; does not study; significant knowledge deficits",
+        0: "Not Observed"
+      },
+      relationship_coworkers: {
+        6: "Excellent - Outstanding team player; excellent relationships; promotes teamwork; respected by all",
+        5: "Very Good - Very good team member; positive relationships; works well with others",
+        4: "Good - Good team member; generally positive relationships; cooperative",
+        3: "Satisfactory - Adequate team member; occasional interpersonal issues; basically cooperative",
+        2: "Marginal - Poor team member; frequent conflicts; difficult to work with",
+        1: "Poor - Disruptive to team; constant conflicts; unable to work with others",
+        0: "Not Observed"
+      },
+      emotional_maturity: {
+        6: "Excellent - Exceptional emotional maturity; handles stress excellently; calm under pressure",
+        5: "Very Good - Very good emotional control; handles stress well; maintains composure",
+        4: "Good - Good emotional maturity; generally handles stress; occasional minor lapses",
+        3: "Satisfactory - Adequate emotional control; sometimes struggles with stress; needs support",
+        2: "Marginal - Poor emotional control; difficulty handling stress; affects performance",
+        1: "Poor - Emotionally immature; unable to handle stress; inappropriate reactions",
+        0: "Not Observed"
+      },
+      accepts_limitations: {
+        6: "Excellent - Humble; prioritizes patient welfare; always calls for help when needed; recognizes own limitations",
+        5: "Very Good - Calls for help whenever needed; generally takes welfare of patients into consideration",
+        4: "Good - Generally takes welfare of patients into consideration but with occasional hesitation to call for help",
+        3: "Satisfactory - Occasionally calls for help when the need arises; sometimes takes welfare of patient into consideration",
+        2: "Marginal - Delays too much before calling for help; sometimes puts welfare of patient in jeopardy",
+        1: "Poor - Arrogant; fails to call for help jeopardizing patient welfare; fails to recognize limitations",
+        0: "Not Observed"
+      }
+    };
+
+    const EVAL_SECTIONS = [
+      { id: 'clinical', name: 'Overall Clinical Competence', max: 42, criteria: [
+        { id: 'database', name: 'DATABASE (History & PE and Diagnosis)' },
+        { id: 'diagnostic_tests', name: 'USE AND INTERPRETATION OF DIAGNOSTIC TESTS' },
+        { id: 'diagnosis_judgement', name: 'DIAGNOSIS AND JUDGEMENT/DECISION MAKING' },
+        { id: 'treatment_management', name: 'PATIENT TREATMENT & MANAGEMENT (Pre/Post-Op)' },
+        { id: 'oral_presentations', name: 'ORAL PRESENTATIONS/REPORTS/REFERRALS' },
+        { id: 'record_keeping', name: 'RECORD KEEPING ABILITY' },
+        { id: 'after_care', name: 'AFTER CARE' }
+      ]},
+      { id: 'technical', name: 'Technical Skills', max: 48, criteria: [
+        { id: 'patient_prep', name: 'PATIENTS PREPARATION' },
+        { id: 'equipment_prep', name: 'PREPARATION OF EQUIPMENT' },
+        { id: 'surgical_principles', name: 'SURGICAL PRINCIPLES & PATIENT SAFETY' },
+        { id: 'technical_dexterity', name: 'TECHNICAL DEXTERITY' },
+        { id: 'conduct_procedure', name: 'GENERAL CONDUCT OF PROCEDURE' },
+        { id: 'intraop_judgement', name: 'INTRA-OPERATIVE JUDGEMENT' },
+        { id: 'postop_care', name: 'POST-OPERATIVE CARE' },
+        { id: 'duration', name: 'DURATION OF PROCEDURE' }
+      ]},
+      { id: 'attitudinal', name: 'Attitudinal Competencies', max: 48, criteria: [
+        { id: 'intellectual_integrity', name: 'INTELLECTUAL INTEGRITY' },
+        { id: 'moral_ethical', name: 'MORAL / ETHICAL VALUES' },
+        { id: 'reliability', name: 'RELIABILITY / RESPONSIBILITY' },
+        { id: 'bedside_decorum', name: 'BEDSIDE DECORUM/PATIENT RELATIONS' },
+        { id: 'study_habits', name: 'STUDY / WORK HABITS' },
+        { id: 'relationship_coworkers', name: 'RELATIONSHIP WITH CO-WORKERS' },
+        { id: 'emotional_maturity', name: 'EMOTIONAL MATURITY/STRESS REACTION' },
+        { id: 'accepts_limitations', name: 'ACCEPTS OWN LIMITATIONS' }
+      ]}
+    ];
+
+    // ==================== UTILITY FUNCTIONS ====================
+    // HTML escaping to prevent XSS attacks
+    function escapeHtml(text) {
+      if (text === null || text === undefined) return '';
+      const div = document.createElement('div');
+      div.textContent = String(text);
+      return div.innerHTML;
+    }
+
+    // Chart instance management to prevent memory leaks
+    const chartInstances = {};
+    function destroyChart(chartId) {
+      if (chartInstances[chartId]) {
+        chartInstances[chartId].destroy();
+        delete chartInstances[chartId];
+      }
+    }
+    function createChart(chartId, ctx, config) {
+      destroyChart(chartId);
+      chartInstances[chartId] = new Chart(ctx, config);
+      return chartInstances[chartId];
+    }
+
+    // Dynamic year range generator (extends to 2036 for long-term use)
+    function getYearRange() {
+      const currentYear = new Date().getFullYear();
+      const startYear = Math.max(2024, currentYear - 2);
+      const endYear = 2036;
+      const years = [];
+      for (let y = startYear; y <= endYear; y++) {
+        years.push(y);
+      }
+      return years;
+    }
+
+    // Get base URL for shareable links
+    function getBaseUrl() {
+      return window.location.href.split('?')[0];
+    }
+
+    // Parse URL parameters for deep linking
+    function getUrlParams() {
+      const params = new URLSearchParams(window.location.search);
+      return {
+        residentId: params.get('resident'),
+        quarter: params.get('quarter'),
+        year: params.get('year'),
+        action: params.get('action') // 'evaluate'
+      };
+    }
+
+    // Generate shareable evaluation link
+    function generateShareableLink(residentId, quarter, year) {
+      const baseUrl = getBaseUrl();
+      const params = new URLSearchParams();
+      if (residentId) params.set('resident', residentId);
+      if (quarter) params.set('quarter', quarter);
+      if (year) params.set('year', year);
+      params.set('action', 'evaluate');
+      return `${baseUrl}?${params.toString()}`;
+    }
+
+    // Copy text to clipboard
+    async function copyToClipboard(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch (err) {
+        // Fallback for older browsers
+        const textArea = document.createElement('textarea');
+        textArea.value = text;
+        document.body.appendChild(textArea);
+        textArea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textArea);
+        return true;
+      }
+    }
+
+    // Export data to CSV
+    function exportToCSV(data, filename) {
+      const csv = convertToCSV(data);
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement('a');
+      const url = URL.createObjectURL(blob);
+      link.setAttribute('href', url);
+      link.setAttribute('download', filename);
+      link.style.visibility = 'hidden';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+
+    function convertToCSV(data) {
+      if (data.length === 0) return '';
+      const headers = Object.keys(data[0]);
+      const rows = data.map(row => headers.map(h => {
+        let val = row[h];
+        if (val === null || val === undefined) val = '';
+        val = String(val).replace(/"/g, '""');
+        return `"${val}"`;
+      }).join(','));
+      return [headers.join(','), ...rows].join('\n');
+    }
+
+    // Generate analytics report data
+    function generateAnalyticsReport() {
+      const report = [];
+      state.residents.forEach(r => {
+        const stats = calculateResidentStats(r.id);
+        if (stats) {
+          report.push({
+            'Resident Name': r.name,
+            'Year Level': r.year_level,
+            'Status': r.status,
+            'Total Evaluations': stats.totalEvaluations,
+            'Average Score (%)': stats.avgPercent.toFixed(2),
+            'Clinical Average': stats.avgClinical.toFixed(2),
+            'Technical Average': stats.avgTechnical.toFixed(2),
+            'Attitudinal Average': stats.avgAttitudinal.toFixed(2),
+            'Trend': stats.trend
+          });
+        }
+      });
+      return report;
+    }
+
+    // Generate evaluations export data
+    function generateEvaluationsExport() {
+      const exportData = [];
+      state.evaluations.forEach(ev => {
+        const resident = state.allResidents.find(r => r.id === ev.resident_id);
+        const evaluator = state.evaluators.find(e => e.id === ev.evaluator_id);
+        const totalMax = calcTotalMax(EVAL_SECTIONS);
+        const totalScore = EVAL_SECTIONS.reduce((sum, s) => sum + calcSectionScore(ev.scores || {}, s), 0);
+
+        exportData.push({
+          'Date': new Date(ev.created_at).toLocaleDateString(),
+          'Resident': resident?.name || 'Unknown',
+          'Year Level': resident?.year_level || '',
+          'Evaluator': evaluator?.name || 'Unknown',
+          'Quarter': ev.quarter,
+          'Year': ev.year,
+          'Evaluation Type': ev.evaluation_type || 'full',
+          'Clinical Score': calcSectionScore(ev.scores || {}, EVAL_SECTIONS[0]),
+          'Technical Score': calcSectionScore(ev.scores || {}, EVAL_SECTIONS[1]),
+          'Attitudinal Score': calcSectionScore(ev.scores || {}, EVAL_SECTIONS[2]),
+          'Total Score': totalScore,
+          'Max Score': totalMax,
+          'Percentage': ((totalScore / totalMax) * 100).toFixed(2),
+          'Comments': ev.comments || ''
+        });
+      });
+      return exportData;
+    }
+
+    function getActiveSections() {
+      const evalType = EVALUATION_TYPES.find(t => t.id === state.evaluationType);
+      return EVAL_SECTIONS.filter(s => evalType.sections.includes(s.id));
+    }
+
+    function calcSectionScore(scores, section) {
+      return section.criteria.reduce((sum, c) => sum + (scores[c.id] || 0), 0);
+    }
+
+    function calcTotalMax(sections) {
+      return sections.reduce((sum, s) => sum + s.max, 0);
+    }
+
+    function getPerformanceLevel(score, max) {
+      const pct = (score / max) * 100;
+      if (pct >= 80) return { level: 'Excellent', color: 'text-emerald-600', bg: 'bg-emerald-100', barColor: 'bg-emerald-500' };
+      if (pct >= THRESHOLD_PERCENT) return { level: 'Satisfactory', color: 'text-blue-600', bg: 'bg-blue-100', barColor: 'bg-blue-500' };
+      return { level: 'Needs Improvement', color: 'text-red-600', bg: 'bg-red-100', barColor: 'bg-red-500' };
+    }
+
+    function getResidentEvaluations(residentId) {
+      return state.evaluations.filter(e => e.resident_id === residentId);
+    }
+
+    function calculateResidentStats(residentId) {
+      const evals = getResidentEvaluations(residentId);
+      if (evals.length === 0) return null;
+
+      const fullEvals = evals.filter(e => !e.evaluation_type || e.evaluation_type === 'full');
+      const totalMax = calcTotalMax(EVAL_SECTIONS);
+      
+      let totalScoreSum = 0;
+      let clinicalSum = 0, technicalSum = 0, attitudinalSum = 0;
+      
+      fullEvals.forEach(ev => {
+        EVAL_SECTIONS.forEach(s => {
+          const sScore = calcSectionScore(ev.scores || {}, s);
+          if (s.id === 'clinical') clinicalSum += sScore;
+          if (s.id === 'technical') technicalSum += sScore;
+          if (s.id === 'attitudinal') attitudinalSum += sScore;
+          totalScoreSum += sScore;
+        });
+      });
+
+      const count = fullEvals.length || 1;
+      return {
+        totalEvaluations: evals.length,
+        fullEvaluations: fullEvals.length,
+        avgTotal: totalScoreSum / count,
+        avgClinical: clinicalSum / count,
+        avgTechnical: technicalSum / count,
+        avgAttitudinal: attitudinalSum / count,
+        avgPercent: (totalScoreSum / count / totalMax) * 100,
+        trend: calculateTrend(fullEvals)
+      };
+    }
+
+    function calculateTrend(evals) {
+      if (evals.length < 2) return 'stable';
+      const sorted = [...evals].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+      const recent = sorted.slice(-2);
+      const totalMax = calcTotalMax(EVAL_SECTIONS);
+      
+      const score1 = EVAL_SECTIONS.reduce((sum, s) => sum + calcSectionScore(recent[0].scores || {}, s), 0);
+      const score2 = EVAL_SECTIONS.reduce((sum, s) => sum + calcSectionScore(recent[1].scores || {}, s), 0);
+      
+      const diff = ((score2 - score1) / totalMax) * 100;
+      if (diff > 5) return 'improving';
+      if (diff < -5) return 'declining';
+      return 'stable';
+    }
+
+    // ==================== API FUNCTIONS ====================
+    async function apiCall(table, method = 'GET', body = null, query = '') {
+      const url = `${SUPABASE_URL}/rest/v1/${table}${query}`;
+      const options = {
+        method,
+        headers: {
+          'apikey': SUPABASE_KEY,
+          'Authorization': `Bearer ${SUPABASE_KEY}`,
+          'Content-Type': 'application/json',
+          'Prefer': 'return=representation'
+        }
+      };
+      if (body) options.body = JSON.stringify(body);
+
+      try {
+        const res = await fetch(url, options);
+        if (!res.ok) {
+          const errorText = await res.text();
+          console.error(`API Error [${method} ${table}]:`, res.status, errorText);
+          return null;
+        }
+        return await res.json();
+      } catch (err) {
+        console.error(`Network Error [${method} ${table}]:`, err.message);
+        return null;
+      }
+    }
+
+    async function apiPatch(table, id, data) {
+      const url = `${SUPABASE_URL}/rest/v1/${table}?id=eq.${id}`;
+      try {
+        const res = await fetch(url, {
+          method: 'PATCH',
+          headers: {
+            'apikey': SUPABASE_KEY,
+            'Authorization': `Bearer ${SUPABASE_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(data)
+        });
+        if (!res.ok) {
+          const errorText = await res.text();
+          console.error(`API Patch Error [${table}]:`, res.status, errorText);
+          return false;
+        }
+        return true;
+      } catch (err) {
+        console.error(`Network Error [PATCH ${table}]:`, err.message);
+        return false;
+      }
+    }
+
+    async function apiDelete(table, query) {
+      const url = `${SUPABASE_URL}/rest/v1/${table}${query}`;
+      try {
+        const res = await fetch(url, {
+          method: 'DELETE',
+          headers: {
+            'apikey': SUPABASE_KEY,
+            'Authorization': `Bearer ${SUPABASE_KEY}`
+          }
+        });
+        if (!res.ok) {
+          const errorText = await res.text();
+          console.error(`API Delete Error [${table}]:`, res.status, errorText);
+          return false;
+        }
+        return true;
+      } catch (err) {
+        console.error(`Network Error [DELETE ${table}]:`, err.message);
+        return false;
+      }
+    }
+
+    async function loadData() {
+      state.isLoading = true;
+      render();
+      try {
+        const [residents, evaluations, scores, evaluators] = await Promise.all([
+          apiCall('residents', 'GET', null, '?select=*'),
+          apiCall('evaluations', 'GET', null, '?select=*'),
+          apiCall('evaluation_scores', 'GET', null, '?select=*'),
+          apiCall('evaluators', 'GET', null, '?select=*')
+        ]);
+        
+        state.allResidents = (residents || []).sort((a, b) => b.year_level - a.year_level || a.name.localeCompare(b.name));
+        state.residents = state.allResidents.filter(r => r.status === 'active');
+        state.evaluators = evaluators || [];
+        
+        state.evaluations = (evaluations || []).map(ev => {
+          const evalScores = (scores || []).filter(s => s.evaluation_id === ev.id);
+          const scoresObj = {};
+          evalScores.forEach(s => { scoresObj[s.criteria_key] = s.score; });
+          return { ...ev, scores: scoresObj };
+        });
+        
+        state.isConnected = true;
+      } catch (err) {
+        console.error('Load error:', err);
+        state.isConnected = false;
+      }
+      state.isLoading = false;
+      render();
+    }
+
+    async function handleLogin() {
+      if (!state.loginEmail.includes('@')) { alert('Please enter a valid email'); return; }
+      state.isLoading = true;
+      render();
+      
+      try {
+        const users = await apiCall('evaluators', 'GET', null, '?select=*');
+        const existing = (users || []).find(u => u.email.toLowerCase() === state.loginEmail.toLowerCase());
+        
+        if (existing) {
+          state.currentUser = existing;
+          state.loginEmail = '';
+          state.isNewUser = false;
+        } else if (!state.loginName.trim()) {
+          state.isNewUser = true;
+        } else {
+          const newUser = await apiCall('evaluators', 'POST', { 
+            email: state.loginEmail.toLowerCase(), 
+            name: state.loginName.trim(), 
+            role: 'evaluator' 
+          });
+          if (newUser && newUser[0]) {
+            state.currentUser = newUser[0];
+            state.loginEmail = '';
+            state.loginName = '';
+            state.isNewUser = false;
+          } else {
+            alert('Error creating account.');
+          }
+        }
+      } catch (err) {
+        console.error('Login error:', err);
+        alert('Connection error');
+      }
+      state.isLoading = false;
+      render();
+    }
+
+    async function handleSubmit() {
+      const activeSections = getActiveSections();
+      const totalCriteria = activeSections.reduce((sum, s) => sum + s.criteria.length, 0);
+      const filled = activeSections.flatMap(s => s.criteria).filter(c => state.scores[c.id] !== undefined).length;
+      
+      if (!state.selectedResident || filled !== totalCriteria) {
+        alert('Please complete all fields.');
+        return;
+      }
+      
+      state.isLoading = true;
+      render();
+      
+      try {
+        const evalData = await apiCall('evaluations', 'POST', {
+          resident_id: state.selectedResident,
+          evaluator_id: state.currentUser.id,
+          quarter: state.selectedQuarter,
+          year: state.selectedYear,
+          rotation: state.rotation,
+          evaluation_type: state.evaluationType,
+          comments: state.comments,
+          status: 'submitted',
+          submitted_at: new Date().toISOString()
+        });
+        
+        if (evalData && evalData[0]) {
+          const scoreRecords = Object.entries(state.scores).map(([key, value]) => ({
+            evaluation_id: evalData[0].id,
+            criteria_key: key,
+            score: value
+          }));
+          await apiCall('evaluation_scores', 'POST', scoreRecords);
+          alert('Evaluation submitted!');
+          resetForm();
+          await loadData();
+        }
+      } catch (err) {
+        console.error('Submit error:', err);
+        alert('Error submitting.');
+      }
+      state.isLoading = false;
+      render();
+    }
+
+    async function addResident() {
+      if (!state.newResidentName.trim()) {
+        alert('Please enter resident name');
+        return;
+      }
+      state.isLoading = true;
+      render();
+      
+      try {
+        await apiCall('residents', 'POST', {
+          name: state.newResidentName.trim(),
+          year_level: state.newResidentYear,
+          status: 'active'
+        });
+        state.newResidentName = '';
+        await loadData();
+      } catch (err) {
+        console.error('Add resident error:', err);
+        alert('Error adding resident.');
+      }
+      state.isLoading = false;
+      render();
+    }
+
+    async function updateResidentStatus(residentId, newStatus, newYearLevel = null) {
+      state.isLoading = true;
+      render();
+
+      const updateData = { status: newStatus };
+      if (newYearLevel !== null) updateData.year_level = newYearLevel;
+
+      const success = await apiPatch('residents', residentId, updateData);
+      if (success) {
+        await loadData();
+      } else {
+        alert('Error updating resident. Please check your connection and try again.');
+      }
+
+      state.isLoading = false;
+      render();
+    }
+
+    async function promoteResident(resident) {
+      if (resident.year_level >= 5) {
+        if (confirm(`${resident.name} is already Year 5. Mark as Graduated?`)) {
+          await updateResidentStatus(resident.id, 'graduated');
+        }
+      } else {
+        if (confirm(`Promote ${resident.name} from Year ${resident.year_level} to Year ${resident.year_level + 1}?`)) {
+          await updateResidentStatus(resident.id, 'active', resident.year_level + 1);
+        }
+      }
+    }
+
+    async function graduateResident(resident) {
+      if (confirm(`Mark ${resident.name} as Graduated?`)) {
+        await updateResidentStatus(resident.id, 'graduated');
+      }
+    }
+
+    async function removeResident(resident) {
+      if (confirm(`Remove ${resident.name} from the program? This will mark them as removed.`)) {
+        await updateResidentStatus(resident.id, 'removed');
+      }
+    }
+
+    async function reactivateResident(resident) {
+      if (confirm(`Reactivate ${resident.name}?`)) {
+        await updateResidentStatus(resident.id, 'active');
+      }
+    }
+
+    async function deleteEvaluation(id) {
+      if (!confirm('Delete this evaluation?')) return;
+      state.isLoading = true;
+      render();
+
+      // Delete scores first, then the evaluation
+      const scoresDeleted = await apiDelete('evaluation_scores', `?evaluation_id=eq.${id}`);
+      const evalDeleted = await apiDelete('evaluations', `?id=eq.${id}`);
+
+      if (scoresDeleted && evalDeleted) {
+        await loadData();
+      } else {
+        alert('Error deleting evaluation. Please check your connection and try again.');
+      }
+
+      state.isLoading = false;
+      render();
+    }
+
+    function resetForm() {
+      state.selectedResident = '';
+      state.scores = {};
+      state.rotation = '';
+      state.comments = '';
+      state.openSections = { clinical: true, technical: false, attitudinal: false };
+      state.openRubrics = {};
+      state.evaluationType = 'full';
+    }
+
+    function getFilteredEvaluations() {
+      let filtered = [...state.evaluations];
+      
+      if (state.filterYear !== 'all') {
+        const resIds = state.allResidents
+          .filter(r => r.year_level === parseInt(state.filterYear))
+          .map(r => r.id);
+        filtered = filtered.filter(e => resIds.includes(e.resident_id));
+      }
+      
+      if (state.filterQuarter !== 'all') {
+        filtered = filtered.filter(e => e.quarter === state.filterQuarter);
+      }
+      
+      return filtered.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    }
+
+    function printResidentSummary(resident) {
+      state.viewingResident = resident;
+      render();
+      setTimeout(() => window.print(), 500);
+    }
+
+    // ==================== RENDER ====================
+    function render() {
+      const app = document.getElementById('app');
+      
+      if (!state.currentUser) {
+        app.innerHTML = renderLogin();
+      } else if (state.viewingResident) {
+        app.innerHTML = renderResidentDetail();
+      } else {
+        app.innerHTML = renderMain();
+      }
+
+      // Render share modal if active
+      if (state.showShareModal) {
+        app.innerHTML += renderShareModal();
+      }
+
+      attachEventListeners();
+      
+      // Initialize charts if analytics tab
+      if (state.activeTab === 'analytics' && !state.viewingResident) {
+        setTimeout(initializeCharts, 100);
+      }
+    }
+
+    function renderLogin() {
+      return `
+        <div class="min-h-screen bg-gradient-to-br from-slate-100 to-emerald-50 flex items-center justify-center p-4">
+          <div class="bg-white rounded-2xl shadow-xl p-8 w-full max-w-md">
+            <div class="text-center mb-6">
+              <img src="logo.jpg" alt="VSMMC Department of General Surgery Logo" class="w-32 h-32 mx-auto mb-4 object-contain"/>
+              <h1 class="text-2xl font-bold text-slate-800">VSMMC General Surgery</h1>
+              <p class="text-lg text-slate-600">Evaluation System</p>
+              <p class="text-sm text-slate-400 mt-1">Version 3.0 • Cloud-Enabled</p>
+              <div class="flex justify-center mt-2">
+                <span class="flex items-center gap-1 text-xs px-2 py-1 rounded ${state.isConnected ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}">
+                  ${state.isLoading ? '⟳ Syncing...' : state.isConnected ? '☁ Connected' : '⚠ Offline'}
+                </span>
+              </div>
+            </div>
+            <div class="space-y-4">
+              <div>
+                <label class="block text-sm font-medium text-slate-700 mb-1">Email Address</label>
+                <input type="email" id="loginEmail" value="${escapeHtml(state.loginEmail)}" class="w-full px-4 py-3 border rounded-xl focus:ring-2 focus:ring-emerald-500 focus:outline-none" placeholder="your.email@vsmmc.gov.ph"/>
+              </div>
+              ${state.isNewUser ? `
+              <div>
+                <label class="block text-sm font-medium text-slate-700 mb-1">Your Full Name (New User)</label>
+                <input type="text" id="loginName" value="${escapeHtml(state.loginName)}" class="w-full px-4 py-3 border rounded-xl focus:ring-2 focus:ring-emerald-500 focus:outline-none" placeholder="Dr. Juan Dela Cruz"/>
+              </div>
+              ` : ''}
+              <button id="loginBtn" class="w-full py-3 bg-emerald-600 text-white rounded-xl font-semibold hover:bg-emerald-700 disabled:opacity-50" ${state.isLoading ? 'disabled' : ''}>
+                ${state.isLoading ? 'Signing In...' : 'Sign In'}
+              </button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderMain() {
+      const activeSections = getActiveSections();
+      const totalCriteria = activeSections.reduce((sum, s) => sum + s.criteria.length, 0);
+      const filledCriteria = activeSections.flatMap(s => s.criteria).filter(c => state.scores[c.id] !== undefined).length;
+      const totalScore = activeSections.reduce((sum, s) => calcSectionScore(state.scores, s), 0);
+      const totalMax = calcTotalMax(activeSections);
+      
+      const groupedResidents = {};
+      state.residents.forEach(r => {
+        if (!groupedResidents[r.year_level]) groupedResidents[r.year_level] = [];
+        groupedResidents[r.year_level].push(r);
+      });
+
+      const tabs = [
+        { id: 'evaluate', icon: '📋', label: 'Evaluate' },
+        { id: 'history', icon: '📊', label: 'History' },
+        { id: 'residents', icon: '👥', label: 'Residents' },
+        { id: 'analytics', icon: '📈', label: 'Analytics' },
+        { id: 'manage', icon: '⚙️', label: 'Manage' }
+      ];
+
+      return `
+        <div class="min-h-screen bg-gradient-to-br from-slate-100 to-emerald-50">
+          <header class="bg-white shadow-sm border-b no-print">
+            <div class="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+              <div>
+                <h1 class="text-xl font-bold text-emerald-700">VSMMC GS Evaluation</h1>
+                <p class="text-xs text-slate-500">Welcome, ${escapeHtml(state.currentUser.name)}</p>
+              </div>
+              <div class="flex items-center gap-3">
+                <span class="flex items-center gap-1 text-xs px-2 py-1 rounded ${state.isConnected ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}">
+                  ${state.isLoading ? '<span class="animate-spin">⟳</span> Syncing...' : state.isConnected ? '☁ Online' : '⚠ Offline'}
+                </span>
+                <button id="refreshBtn" class="p-2 hover:bg-slate-100 rounded-lg ${state.isLoading ? 'animate-spin' : ''}">⟳</button>
+                <button id="logoutBtn" class="flex items-center gap-1 px-3 py-1.5 bg-slate-100 rounded-lg hover:bg-slate-200 text-sm">↪ Logout</button>
+              </div>
+            </div>
+          </header>
+
+          <nav class="bg-white border-b no-print">
+            <div class="max-w-6xl mx-auto px-4 flex gap-1 overflow-x-auto">
+              ${tabs.map(tab => `
+                <button class="tab-btn flex items-center gap-2 px-4 py-3 border-b-2 transition-colors whitespace-nowrap ${state.activeTab === tab.id ? 'border-emerald-500 text-emerald-600' : 'border-transparent text-slate-600 hover:text-slate-800'}" data-tab="${tab.id}">
+                  <span>${tab.icon}</span>${tab.label}
+                </button>
+              `).join('')}
+            </div>
+          </nav>
+
+          <main class="max-w-6xl mx-auto px-4 py-6">
+            ${state.activeTab === 'evaluate' ? renderEvaluateTab(groupedResidents, activeSections, filledCriteria, totalCriteria, totalScore, totalMax) : ''}
+            ${state.activeTab === 'history' ? renderHistoryTab() : ''}
+            ${state.activeTab === 'residents' ? renderResidentsTab() : ''}
+            ${state.activeTab === 'analytics' ? renderAnalyticsTab() : ''}
+            ${state.activeTab === 'manage' ? renderManageTab() : ''}
+          </main>
+        </div>
+      `;
+    }
+
+    function renderEvaluateTab(groupedResidents, activeSections, filledCriteria, totalCriteria, totalScore, totalMax) {
+      return `
+        <div class="space-y-4">
+          <div class="bg-gradient-to-r from-emerald-50 to-blue-50 rounded-xl p-4 border border-emerald-200">
+            <label class="block text-sm font-semibold text-slate-700 mb-2">Evaluation Type</label>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-2">
+              ${EVALUATION_TYPES.map(type => `
+                <button class="eval-type-btn px-3 py-2 rounded-lg text-sm font-medium transition-all ${state.evaluationType === type.id 
+                  ? 'bg-emerald-600 text-white shadow-md' 
+                  : 'bg-white text-slate-600 border hover:border-emerald-300 hover:bg-emerald-50'}" data-type="${type.id}">
+                  ${type.name}
+                </button>
+              `).join('')}
+            </div>
+          </div>
+
+          <div class="bg-white rounded-xl p-4 border">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <label class="block text-sm font-medium text-slate-700 mb-1">Resident</label>
+                <select id="residentSelect" class="w-full px-3 py-2 border rounded-lg">
+                  <option value="">Select Resident</option>
+                  ${[5,4,3,2,1].map(year => groupedResidents[year] ? `
+                    <optgroup label="Year ${year}">
+                      ${groupedResidents[year].map(r => `<option value="${escapeHtml(r.id)}" ${state.selectedResident === r.id ? 'selected' : ''}>${escapeHtml(r.name)}</option>`).join('')}
+                    </optgroup>
+                  ` : '').join('')}
+                </select>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-slate-700 mb-1">Quarter</label>
+                <select id="quarterSelect" class="w-full px-3 py-2 border rounded-lg">
+                  ${ROTATIONS.map(q => `<option value="${q}" ${state.selectedQuarter === q ? 'selected' : ''}>${q} - ${ROTATION_LABELS[q]}</option>`).join('')}
+                </select>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-slate-700 mb-1">Year</label>
+                <select id="yearSelect" class="w-full px-3 py-2 border rounded-lg">
+                  ${getYearRange().map(y => `<option value="${y}" ${state.selectedYear === y ? 'selected' : ''}>${y}</option>`).join('')}
+                </select>
+              </div>
+            </div>
+          </div>
+
+          ${activeSections.map(section => {
+            const sectionScore = calcSectionScore(state.scores, section);
+            const filled = section.criteria.filter(c => state.scores[c.id] !== undefined).length;
+            return `
+              <div class="bg-white rounded-xl border overflow-hidden">
+                <button class="section-toggle w-full px-4 py-3 flex items-center justify-between hover:bg-slate-50" data-section="${section.id}">
+                  <div class="flex items-center gap-2">
+                    <div class="w-2 h-2 rounded-full ${filled === section.criteria.length ? 'bg-emerald-500' : 'bg-amber-400'}"></div>
+                    <span class="font-semibold text-slate-800">${section.name}</span>
+                    <span class="text-xs text-slate-500">(${filled}/${section.criteria.length})</span>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <span class="font-bold text-emerald-600">${sectionScore}/${section.max}</span>
+                    <span>${state.openSections[section.id] ? '▲' : '▼'}</span>
+                  </div>
+                </button>
+                ${state.openSections[section.id] ? `
+                  <div class="px-4 pb-3">
+                    ${section.criteria.map((c, idx) => `
+                      <div class="py-3 border-b border-slate-100 last:border-0">
+                        <div class="flex flex-col gap-2">
+                          <div class="flex items-start justify-between gap-2">
+                            <div class="flex-1">
+                              <div class="flex items-center gap-2 flex-wrap">
+                                <span class="text-xs font-bold text-slate-400">${idx + 1}.</span>
+                                <span class="text-sm font-medium text-slate-700">${c.name}</span>
+                                <button class="rubric-toggle text-xs text-blue-600 hover:text-blue-800 hover:underline" data-criterion="${c.id}">
+                                  ${state.openRubrics[c.id] ? '▼ Hide' : '▶ Rubric'}
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                          
+                          <div class="rubric-panel ${state.openRubrics[c.id] ? 'open' : ''} ml-4">
+                            <div class="bg-slate-50 rounded-lg p-3 text-xs space-y-1 border-l-4 border-emerald-400">
+                              ${[6,5,4,3,2,1,0].map(score => `
+                                <div class="flex gap-2 py-1 ${state.scores[c.id] === score ? 'bg-emerald-100 rounded px-2 -mx-2' : ''}">
+                                  <span class="font-bold w-8 score-${score} text-center rounded px-1">${score}</span>
+                                  <span class="text-slate-600 flex-1">${RUBRICS[c.id][score]}</span>
+                                </div>
+                              `).join('')}
+                            </div>
+                          </div>
+                          
+                          <div class="flex items-center gap-1 ml-4 flex-wrap">
+                            ${[0,1,2,3,4,5,6].map(s => `
+                              <button class="score-btn score-${s} ${state.scores[c.id] === s ? 'selected' : ''}" data-criterion="${c.id}" data-score="${s}">${s}</button>
+                            `).join('')}
+                            ${state.scores[c.id] !== undefined ? `<span class="ml-2 text-xs px-2 py-0.5 rounded score-${state.scores[c.id]} font-medium">${SCORE_LABELS[state.scores[c.id]]}</span>` : ''}
+                          </div>
+                        </div>
+                      </div>
+                    `).join('')}
+                    
+                    <div class="mt-3 pt-3 border-t border-slate-200 flex justify-between items-center">
+                      <span class="text-sm font-semibold text-slate-600">Section Total:</span>
+                      <span class="text-lg font-bold text-emerald-600">${sectionScore} / ${section.max}</span>
+                    </div>
+                  </div>
+                ` : ''}
+              </div>
+            `;
+          }).join('')}
+
+          <div class="bg-white rounded-xl p-4 border">
+            <label class="block text-sm font-semibold text-slate-700 mb-2">Comments</label>
+            <textarea id="commentsField" class="w-full px-3 py-2 border rounded-lg h-24 resize-none focus:ring-2 focus:ring-emerald-500 focus:outline-none" placeholder="Additional comments or observations...">${escapeHtml(state.comments)}</textarea>
+          </div>
+
+          <div class="bg-white rounded-xl p-4 border">
+            <div class="flex items-center justify-between mb-4">
+              <div><span class="text-sm text-slate-600">Progress: </span><span class="font-bold text-emerald-600">${filledCriteria}/${totalCriteria}</span></div>
+              <div><span class="text-sm text-slate-600">Score: </span><span class="font-bold text-emerald-600">${totalScore}/${totalMax} (${totalMax > 0 ? ((totalScore/totalMax)*100).toFixed(1) : 0}%)</span></div>
+            </div>
+            <div class="flex gap-2">
+              <button id="clearBtn" class="px-4 py-2 border rounded-lg hover:bg-slate-50">Clear</button>
+              <button id="shareLinkBtn" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50" ${!state.selectedResident ? 'disabled' : ''} title="Generate shareable link for this evaluation">
+                🔗 Share
+              </button>
+              <button id="submitBtn" class="flex-1 py-2 bg-emerald-600 text-white rounded-lg font-semibold hover:bg-emerald-700 disabled:opacity-50" ${filledCriteria !== totalCriteria || !state.selectedResident ? 'disabled' : ''}>
+                ✓ Submit Evaluation
+              </button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderHistoryTab() {
+      const filteredEvaluations = getFilteredEvaluations();
+
+      return `
+        <div class="space-y-4">
+          <div class="bg-white rounded-xl p-4 border flex flex-wrap gap-4 items-center">
+            <select id="filterYear" class="px-3 py-2 border rounded-lg">
+              <option value="all" ${state.filterYear === 'all' ? 'selected' : ''}>All Years</option>
+              ${[1,2,3,4,5].map(y => `<option value="${y}" ${state.filterYear === String(y) ? 'selected' : ''}>Year ${y}</option>`).join('')}
+            </select>
+            <select id="filterQuarter" class="px-3 py-2 border rounded-lg">
+              <option value="all" ${state.filterQuarter === 'all' ? 'selected' : ''}>All Quarters</option>
+              ${ROTATIONS.map(q => `<option value="${q}" ${state.filterQuarter === q ? 'selected' : ''}>${q}</option>`).join('')}
+            </select>
+          </div>
+          
+          <div class="bg-white rounded-xl border overflow-x-auto">
+            <table class="w-full">
+              <thead class="bg-slate-50">
+                <tr>
+                  <th class="px-4 py-3 text-left text-sm font-semibold">Date</th>
+                  <th class="px-4 py-3 text-left text-sm font-semibold">Resident</th>
+                  <th class="px-4 py-3 text-left text-sm font-semibold">Type</th>
+                  <th class="px-4 py-3 text-left text-sm font-semibold">Quarter</th>
+                  <th class="px-4 py-3 text-left text-sm font-semibold">Score</th>
+                  <th class="px-4 py-3 text-left text-sm font-semibold">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${filteredEvaluations.length === 0 ? `
+                  <tr><td colspan="6" class="px-4 py-8 text-center text-slate-500">No evaluations found</td></tr>
+                ` : filteredEvaluations.map(ev => {
+                  const res = state.allResidents.find(r => r.id === ev.resident_id);
+                  const evalType = EVALUATION_TYPES.find(t => t.id === (ev.evaluation_type || 'full')) || EVALUATION_TYPES[0];
+                  const relevantSections = EVAL_SECTIONS.filter(s => evalType.sections.includes(s.id));
+                  const actualTotal = relevantSections.reduce((sum, s) => sum + calcSectionScore(ev.scores || {}, s), 0);
+                  const totalMax = calcTotalMax(relevantSections);
+                  const pct = totalMax > 0 ? (actualTotal / totalMax) * 100 : 0;
+                  const perf = getPerformanceLevel(actualTotal, totalMax);
+                  return `
+                    <tr class="border-t hover:bg-slate-50">
+                      <td class="px-4 py-3 text-sm">${new Date(ev.created_at).toLocaleDateString()}</td>
+                      <td class="px-4 py-3 text-sm font-medium">${escapeHtml(res?.name || 'Unknown')}</td>
+                      <td class="px-4 py-3 text-sm"><span class="px-2 py-0.5 bg-slate-100 rounded text-xs">${escapeHtml(evalType.name.replace(' Only', '').replace('Full Quarterly ', 'Full'))}</span></td>
+                      <td class="px-4 py-3 text-sm">${escapeHtml(ev.quarter)} ${ev.year}</td>
+                      <td class="px-4 py-3"><span class="px-2 py-1 rounded text-xs font-medium ${perf.bg} ${perf.color}">${actualTotal}/${totalMax} (${pct.toFixed(1)}%)</span></td>
+                      <td class="px-4 py-3">
+                        <button class="delete-eval-btn p-1 hover:bg-red-100 rounded text-red-600" data-id="${escapeHtml(ev.id)}" title="Delete">🗑️</button>
+                      </td>
+                    </tr>
+                  `;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderResidentsTab() {
+      const filteredResidents = state.allResidents.filter(r => {
+        const yearMatch = state.residentFilterYear === 'all' || r.year_level === parseInt(state.residentFilterYear);
+        const statusMatch = state.residentFilterStatus === 'all' || r.status === state.residentFilterStatus;
+        return yearMatch && statusMatch;
+      });
+
+      return `
+        <div class="space-y-4">
+          <div class="bg-white rounded-xl p-4 border flex flex-wrap gap-4 items-center">
+            <select id="residentFilterYear" class="px-3 py-2 border rounded-lg">
+              <option value="all" ${state.residentFilterYear === 'all' ? 'selected' : ''}>All Years</option>
+              ${[1,2,3,4,5].map(y => `<option value="${y}" ${state.residentFilterYear === String(y) ? 'selected' : ''}>Year ${y}</option>`).join('')}
+            </select>
+            <select id="residentFilterStatus" class="px-3 py-2 border rounded-lg">
+              <option value="all" ${state.residentFilterStatus === 'all' ? 'selected' : ''}>All Status</option>
+              <option value="active" ${state.residentFilterStatus === 'active' ? 'selected' : ''}>Active</option>
+              <option value="graduated" ${state.residentFilterStatus === 'graduated' ? 'selected' : ''}>Graduated</option>
+              <option value="removed" ${state.residentFilterStatus === 'removed' ? 'selected' : ''}>Removed</option>
+            </select>
+          </div>
+          
+          <div class="grid gap-3">
+            ${filteredResidents.map(r => {
+              const resEvals = getResidentEvaluations(r.id);
+              const stats = calculateResidentStats(r.id);
+              const statusInfo = STATUS_LABELS[r.status] || STATUS_LABELS.active;
+              const trendIcon = stats?.trend === 'improving' ? '📈' : stats?.trend === 'declining' ? '📉' : '➡️';
+              
+              return `
+                <div class="bg-white rounded-xl p-4 border">
+                  <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                    <div class="flex-1">
+                      <div class="flex items-center gap-2 flex-wrap">
+                        <h3 class="font-semibold text-slate-800">${escapeHtml(r.name)}</h3>
+                        <span class="px-2 py-0.5 rounded text-xs font-medium ${statusInfo.color}">${escapeHtml(statusInfo.label)}</span>
+                      </div>
+                      <p class="text-sm text-slate-500">Year ${r.year_level} • ${resEvals.length} evaluations</p>
+                      ${stats ? `
+                        <div class="flex items-center gap-4 mt-2 text-xs">
+                          <span class="text-slate-600">Avg: <strong class="${stats.avgPercent >= 80 ? 'text-emerald-600' : stats.avgPercent >= 60 ? 'text-blue-600' : 'text-red-600'}">${stats.avgPercent.toFixed(1)}%</strong></span>
+                          <span class="text-slate-600">Trend: ${trendIcon}</span>
+                        </div>
+                      ` : ''}
+                    </div>
+                    <div class="flex items-center gap-2 flex-wrap">
+                      <button class="view-resident-btn px-3 py-1.5 bg-blue-100 text-blue-700 rounded-lg text-sm hover:bg-blue-200 disabled:opacity-50" data-id="${escapeHtml(r.id)}" ${state.isLoading ? 'disabled' : ''}>
+                        👁️ View
+                      </button>
+                      <button class="print-resident-btn px-3 py-1.5 bg-slate-100 text-slate-700 rounded-lg text-sm hover:bg-slate-200 disabled:opacity-50" data-id="${escapeHtml(r.id)}" ${state.isLoading ? 'disabled' : ''}>
+                        🖨️ Print
+                      </button>
+                      ${r.status === 'active' ? `
+                        <button class="promote-resident-btn px-3 py-1.5 bg-emerald-100 text-emerald-700 rounded-lg text-sm hover:bg-emerald-200 disabled:opacity-50" data-id="${escapeHtml(r.id)}" ${state.isLoading ? 'disabled' : ''}>
+                          ⬆️ ${r.year_level >= 5 ? 'Graduate' : 'Promote'}
+                        </button>
+                        <button class="graduate-resident-btn px-3 py-1.5 bg-blue-100 text-blue-700 rounded-lg text-sm hover:bg-blue-200 disabled:opacity-50" data-id="${escapeHtml(r.id)}" ${state.isLoading ? 'disabled' : ''}>
+                          🎓 Graduate
+                        </button>
+                        <button class="remove-resident-btn px-3 py-1.5 bg-red-100 text-red-700 rounded-lg text-sm hover:bg-red-200 disabled:opacity-50" data-id="${escapeHtml(r.id)}" ${state.isLoading ? 'disabled' : ''}>
+                          ❌ Remove
+                        </button>
+                      ` : `
+                        <button class="reactivate-resident-btn px-3 py-1.5 bg-amber-100 text-amber-700 rounded-lg text-sm hover:bg-amber-200 disabled:opacity-50" data-id="${escapeHtml(r.id)}" ${state.isLoading ? 'disabled' : ''}>
+                          ♻️ Reactivate
+                        </button>
+                      `}
+                    </div>
+                  </div>
+                </div>
+              `;
+            }).join('')}
+            ${filteredResidents.length === 0 ? `
+              <div class="bg-white rounded-xl p-8 border text-center text-slate-500">
+                No residents found
+              </div>
+            ` : ''}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderResidentDetail() {
+      const r = state.viewingResident;
+      const evals = getResidentEvaluations(r.id).sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+      const stats = calculateResidentStats(r.id);
+      const statusInfo = STATUS_LABELS[r.status] || STATUS_LABELS.active;
+      const totalMax = calcTotalMax(EVAL_SECTIONS);
+
+      return `
+        <div class="min-h-screen bg-gradient-to-br from-slate-100 to-emerald-50">
+          <!-- Print Header -->
+          <div class="print-only p-8">
+            <h1 class="text-2xl font-bold text-center">VSMMC General Surgery Department</h1>
+            <h2 class="text-xl text-center text-slate-600">Resident Evaluation Summary</h2>
+            <p class="text-center text-sm text-slate-500 mt-2">Generated: ${new Date().toLocaleDateString()}</p>
+          </div>
+
+          <!-- Screen Header -->
+          <header class="bg-white shadow-sm border-b no-print">
+            <div class="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+              <button id="backToResidents" class="flex items-center gap-2 text-slate-600 hover:text-slate-800">
+                ← Back to Residents
+              </button>
+              <button id="printSummaryBtn" class="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700">
+                🖨️ Print Summary
+              </button>
+            </div>
+          </header>
+
+          <main class="max-w-6xl mx-auto px-4 py-6">
+            <!-- Resident Info -->
+            <div class="bg-white rounded-xl p-6 border mb-6">
+              <div class="flex flex-col md:flex-row justify-between gap-4">
+                <div>
+                  <h1 class="text-2xl font-bold text-slate-800">${escapeHtml(r.name)}</h1>
+                  <div class="flex items-center gap-2 mt-1">
+                    <span class="text-slate-600">Year Level: <strong>${r.year_level}</strong></span>
+                    <span class="px-2 py-0.5 rounded text-xs font-medium ${statusInfo.color}">${escapeHtml(statusInfo.label)}</span>
+                  </div>
+                </div>
+                <div class="text-right">
+                  <p class="text-sm text-slate-500">Total Evaluations: <strong>${evals.length}</strong></p>
+                  ${stats ? `<p class="text-sm text-slate-500">Average Score: <strong class="${stats.avgPercent >= 80 ? 'text-emerald-600' : stats.avgPercent >= 60 ? 'text-blue-600' : 'text-red-600'}">${stats.avgPercent.toFixed(1)}%</strong></p>` : ''}
+                </div>
+              </div>
+            </div>
+
+            ${stats ? `
+            <!-- Summary Statistics -->
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+              <div class="bg-white rounded-xl p-4 border text-center">
+                <p class="text-3xl font-bold text-emerald-600">${stats.avgPercent.toFixed(1)}%</p>
+                <p class="text-sm text-slate-500">Overall Average</p>
+              </div>
+              <div class="bg-white rounded-xl p-4 border text-center">
+                <p class="text-2xl font-bold text-blue-600">${stats.avgClinical.toFixed(1)}/42</p>
+                <p class="text-sm text-slate-500">Clinical Avg</p>
+              </div>
+              <div class="bg-white rounded-xl p-4 border text-center">
+                <p class="text-2xl font-bold text-purple-600">${stats.avgTechnical.toFixed(1)}/48</p>
+                <p class="text-sm text-slate-500">Technical Avg</p>
+              </div>
+              <div class="bg-white rounded-xl p-4 border text-center">
+                <p class="text-2xl font-bold text-amber-600">${stats.avgAttitudinal.toFixed(1)}/48</p>
+                <p class="text-sm text-slate-500">Attitudinal Avg</p>
+              </div>
+            </div>
+
+            <!-- Progress Bars -->
+            <div class="bg-white rounded-xl p-6 border mb-6">
+              <h3 class="font-semibold text-slate-800 mb-4">Competency Breakdown</h3>
+              <div class="space-y-4">
+                <div>
+                  <div class="flex justify-between text-sm mb-1">
+                    <span>Clinical Competence</span>
+                    <span>${((stats.avgClinical / 42) * 100).toFixed(1)}%</span>
+                  </div>
+                  <div class="progress-bar">
+                    <div class="progress-fill ${getPerformanceLevel(stats.avgClinical, 42).barColor}" style="width: ${(stats.avgClinical / 42) * 100}%"></div>
+                  </div>
+                </div>
+                <div>
+                  <div class="flex justify-between text-sm mb-1">
+                    <span>Technical Skills</span>
+                    <span>${((stats.avgTechnical / 48) * 100).toFixed(1)}%</span>
+                  </div>
+                  <div class="progress-bar">
+                    <div class="progress-fill ${getPerformanceLevel(stats.avgTechnical, 48).barColor}" style="width: ${(stats.avgTechnical / 48) * 100}%"></div>
+                  </div>
+                </div>
+                <div>
+                  <div class="flex justify-between text-sm mb-1">
+                    <span>Attitudinal Competencies</span>
+                    <span>${((stats.avgAttitudinal / 48) * 100).toFixed(1)}%</span>
+                  </div>
+                  <div class="progress-bar">
+                    <div class="progress-fill ${getPerformanceLevel(stats.avgAttitudinal, 48).barColor}" style="width: ${(stats.avgAttitudinal / 48) * 100}%"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            ` : ''}
+
+            <!-- Evaluation History -->
+            <div class="bg-white rounded-xl border overflow-hidden">
+              <div class="px-4 py-3 bg-slate-50 border-b">
+                <h3 class="font-semibold text-slate-800">Evaluation History</h3>
+              </div>
+              <table class="w-full">
+                <thead class="bg-slate-50">
+                  <tr>
+                    <th class="px-4 py-3 text-left text-sm font-semibold">Date</th>
+                    <th class="px-4 py-3 text-left text-sm font-semibold">Period</th>
+                    <th class="px-4 py-3 text-left text-sm font-semibold">Clinical</th>
+                    <th class="px-4 py-3 text-left text-sm font-semibold">Technical</th>
+                    <th class="px-4 py-3 text-left text-sm font-semibold">Attitudinal</th>
+                    <th class="px-4 py-3 text-left text-sm font-semibold">Total</th>
+                    <th class="px-4 py-3 text-left text-sm font-semibold">%</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${evals.length === 0 ? `
+                    <tr><td colspan="7" class="px-4 py-8 text-center text-slate-500">No evaluations yet</td></tr>
+                  ` : evals.map(ev => {
+                    const clinical = calcSectionScore(ev.scores || {}, EVAL_SECTIONS[0]);
+                    const technical = calcSectionScore(ev.scores || {}, EVAL_SECTIONS[1]);
+                    const attitudinal = calcSectionScore(ev.scores || {}, EVAL_SECTIONS[2]);
+                    const total = clinical + technical + attitudinal;
+                    const pct = (total / totalMax) * 100;
+                    const perf = getPerformanceLevel(total, totalMax);
+                    return `
+                      <tr class="border-t">
+                        <td class="px-4 py-3 text-sm">${new Date(ev.created_at).toLocaleDateString()}</td>
+                        <td class="px-4 py-3 text-sm">${ev.quarter} ${ev.year}</td>
+                        <td class="px-4 py-3 text-sm">${clinical}/42</td>
+                        <td class="px-4 py-3 text-sm">${technical}/48</td>
+                        <td class="px-4 py-3 text-sm">${attitudinal}/48</td>
+                        <td class="px-4 py-3 text-sm font-medium">${total}/${totalMax}</td>
+                        <td class="px-4 py-3"><span class="px-2 py-1 rounded text-xs font-medium ${perf.bg} ${perf.color}">${pct.toFixed(1)}%</span></td>
+                      </tr>
+                    `;
+                  }).join('')}
+                </tbody>
+              </table>
+            </div>
+
+            <!-- Chart Container -->
+            ${evals.length >= 2 ? `
+            <div class="bg-white rounded-xl p-6 border mt-6 no-print">
+              <h3 class="font-semibold text-slate-800 mb-4">Progress Over Time</h3>
+              <canvas id="residentProgressChart" height="200"></canvas>
+            </div>
+            ` : ''}
+          </main>
+        </div>
+      `;
+    }
+
+    function renderAnalyticsTab() {
+      const activeResidents = state.residents;
+      const totalMax = calcTotalMax(EVAL_SECTIONS);
+
+      // Calculate program-wide stats
+      const residentStats = activeResidents.map(r => ({
+        ...r,
+        stats: calculateResidentStats(r.id)
+      })).filter(r => r.stats);
+
+      const avgProgramScore = residentStats.length > 0
+        ? residentStats.reduce((sum, r) => sum + r.stats.avgPercent, 0) / residentStats.length
+        : 0;
+
+      // Group by year level
+      const byYear = {};
+      residentStats.forEach(r => {
+        if (!byYear[r.year_level]) byYear[r.year_level] = [];
+        byYear[r.year_level].push(r);
+      });
+
+      return `
+        <div class="space-y-6">
+          <!-- Print Header (only visible when printing) -->
+          <div class="print-only mb-6">
+            <h1 class="text-2xl font-bold text-center">VSMMC Department of General Surgery</h1>
+            <h2 class="text-xl text-center text-slate-600">Residency Program Analytics Report</h2>
+            <p class="text-center text-sm text-slate-500 mt-2">Generated: ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}</p>
+          </div>
+
+          <!-- Action Buttons -->
+          <div class="bg-white rounded-xl p-4 border flex flex-wrap gap-3 items-center justify-between no-print">
+            <h2 class="text-lg font-semibold text-slate-800">Program Analytics</h2>
+            <div class="flex gap-2">
+              <button id="printAnalyticsBtn" class="px-4 py-2 bg-slate-100 text-slate-700 rounded-lg hover:bg-slate-200 text-sm font-medium">
+                🖨️ Print Report
+              </button>
+              <button id="exportAnalyticsCSV" class="px-4 py-2 bg-emerald-100 text-emerald-700 rounded-lg hover:bg-emerald-200 text-sm font-medium">
+                📊 Export CSV
+              </button>
+              <button id="exportEvaluationsCSV" class="px-4 py-2 bg-blue-100 text-blue-700 rounded-lg hover:bg-blue-200 text-sm font-medium">
+                📋 Export All Evaluations
+              </button>
+            </div>
+          </div>
+          <!-- Program Overview -->
+          <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div class="bg-white rounded-xl p-6 border text-center">
+              <p class="text-3xl font-bold text-emerald-600">${activeResidents.length}</p>
+              <p class="text-sm text-slate-500">Active Residents</p>
+            </div>
+            <div class="bg-white rounded-xl p-6 border text-center">
+              <p class="text-3xl font-bold text-blue-600">${state.evaluations.length}</p>
+              <p class="text-sm text-slate-500">Total Evaluations</p>
+            </div>
+            <div class="bg-white rounded-xl p-6 border text-center">
+              <p class="text-3xl font-bold ${avgProgramScore >= 80 ? 'text-emerald-600' : avgProgramScore >= 60 ? 'text-blue-600' : 'text-red-600'}">${avgProgramScore.toFixed(1)}%</p>
+              <p class="text-sm text-slate-500">Program Average</p>
+            </div>
+            <div class="bg-white rounded-xl p-6 border text-center">
+              <p class="text-3xl font-bold text-purple-600">${state.allResidents.filter(r => r.status === 'graduated').length}</p>
+              <p class="text-sm text-slate-500">Graduates</p>
+            </div>
+          </div>
+
+          <!-- Charts -->
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div class="bg-white rounded-xl p-6 border">
+              <h3 class="font-semibold text-slate-800 mb-4">Average Score by Year Level</h3>
+              <canvas id="yearLevelChart" height="200"></canvas>
+            </div>
+            <div class="bg-white rounded-xl p-6 border">
+              <h3 class="font-semibold text-slate-800 mb-4">Competency Distribution</h3>
+              <canvas id="competencyChart" height="200"></canvas>
+            </div>
+          </div>
+
+          <!-- Resident Rankings -->
+          <div class="bg-white rounded-xl border overflow-hidden">
+            <div class="px-4 py-3 bg-slate-50 border-b">
+              <h3 class="font-semibold text-slate-800">Resident Performance Rankings</h3>
+            </div>
+            <table class="w-full">
+              <thead class="bg-slate-50">
+                <tr>
+                  <th class="px-4 py-3 text-left text-sm font-semibold">Rank</th>
+                  <th class="px-4 py-3 text-left text-sm font-semibold">Resident</th>
+                  <th class="px-4 py-3 text-left text-sm font-semibold">Year</th>
+                  <th class="px-4 py-3 text-left text-sm font-semibold">Evaluations</th>
+                  <th class="px-4 py-3 text-left text-sm font-semibold">Average</th>
+                  <th class="px-4 py-3 text-left text-sm font-semibold">Trend</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${residentStats.sort((a, b) => b.stats.avgPercent - a.stats.avgPercent).map((r, idx) => {
+                  const perf = getPerformanceLevel(r.stats.avgPercent, 100);
+                  const trendIcon = r.stats.trend === 'improving' ? '📈' : r.stats.trend === 'declining' ? '📉' : '➡️';
+                  return `
+                    <tr class="border-t hover:bg-slate-50">
+                      <td class="px-4 py-3 text-sm font-bold">${idx + 1}</td>
+                      <td class="px-4 py-3 text-sm font-medium">${escapeHtml(r.name)}</td>
+                      <td class="px-4 py-3 text-sm">Year ${r.year_level}</td>
+                      <td class="px-4 py-3 text-sm">${r.stats.totalEvaluations}</td>
+                      <td class="px-4 py-3"><span class="px-2 py-1 rounded text-xs font-medium ${perf.bg} ${perf.color}">${r.stats.avgPercent.toFixed(1)}%</span></td>
+                      <td class="px-4 py-3 text-lg">${trendIcon}</td>
+                    </tr>
+                  `;
+                }).join('')}
+                ${residentStats.length === 0 ? `
+                  <tr><td colspan="6" class="px-4 py-8 text-center text-slate-500">No evaluation data available</td></tr>
+                ` : ''}
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Residents Needing Attention -->
+          ${residentStats.filter(r => r.stats.avgPercent < 60 || r.stats.trend === 'declining').length > 0 ? `
+          <div class="bg-red-50 rounded-xl border border-red-200 p-6">
+            <h3 class="font-semibold text-red-800 mb-4">⚠️ Residents Needing Attention</h3>
+            <div class="space-y-2">
+              ${residentStats.filter(r => r.stats.avgPercent < 60 || r.stats.trend === 'declining').map(r => `
+                <div class="bg-white rounded-lg p-3 flex justify-between items-center">
+                  <div>
+                    <span class="font-medium">${escapeHtml(r.name)}</span>
+                    <span class="text-sm text-slate-500 ml-2">Year ${r.year_level}</span>
+                  </div>
+                  <div class="flex items-center gap-4">
+                    ${r.stats.avgPercent < 60 ? `<span class="text-sm text-red-600">Below 60% (${r.stats.avgPercent.toFixed(1)}%)</span>` : ''}
+                    ${r.stats.trend === 'declining' ? `<span class="text-sm text-amber-600">📉 Declining</span>` : ''}
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+          ` : ''}
+        </div>
+      `;
+    }
+
+    function renderShareModal() {
+      const resident = state.allResidents.find(r => r.id === state.selectedResident);
+      return `
+        <div class="modal active" id="shareModal">
+          <div class="bg-white rounded-2xl p-6 w-full max-w-lg mx-4 shadow-2xl">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="text-lg font-bold text-slate-800">Share Evaluation Link</h3>
+              <button id="closeShareModal" class="p-2 hover:bg-slate-100 rounded-lg text-slate-500">✕</button>
+            </div>
+
+            ${resident ? `
+              <p class="text-sm text-slate-600 mb-4">
+                Share this link with evaluators to evaluate <strong>${escapeHtml(resident.name)}</strong> for <strong>${state.selectedQuarter} ${state.selectedYear}</strong>
+              </p>
+            ` : `
+              <p class="text-sm text-slate-600 mb-4">
+                Share this link with evaluators to access the evaluation system.
+              </p>
+            `}
+
+            <div class="mb-4">
+              <label class="block text-sm font-medium text-slate-700 mb-2">Evaluation Link</label>
+              <div class="flex gap-2">
+                <input type="text" readonly value="${escapeHtml(state.shareableLink)}" class="share-input flex-1 px-3 py-2 border rounded-lg bg-slate-50 text-sm" id="shareableLinkInput"/>
+                <button id="copyLinkBtn" class="px-4 py-2 ${state.shareLinkCopied ? 'bg-emerald-600' : 'bg-blue-600'} text-white rounded-lg hover:opacity-90 text-sm font-medium">
+                  ${state.shareLinkCopied ? '✓ Copied!' : 'Copy'}
+                </button>
+              </div>
+            </div>
+
+            <div class="border-t pt-4">
+              <p class="text-sm font-medium text-slate-700 mb-3">Share via:</p>
+              <div class="flex flex-wrap gap-2">
+                <a href="mailto:?subject=VSMMC%20Evaluation%20Request&body=Please%20complete%20the%20resident%20evaluation%20using%20this%20link:%20${encodeURIComponent(state.shareableLink)}"
+                   class="flex items-center gap-2 px-4 py-2 bg-slate-100 rounded-lg hover:bg-slate-200 text-sm" target="_blank">
+                  📧 Email
+                </a>
+                <a href="https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(state.shareableLink)}"
+                   class="flex items-center gap-2 px-4 py-2 bg-blue-100 text-blue-700 rounded-lg hover:bg-blue-200 text-sm" target="_blank">
+                  📘 Facebook
+                </a>
+                <a href="viber://forward?text=Please%20complete%20the%20resident%20evaluation:%20${encodeURIComponent(state.shareableLink)}"
+                   class="flex items-center gap-2 px-4 py-2 bg-purple-100 text-purple-700 rounded-lg hover:bg-purple-200 text-sm">
+                  💬 Viber
+                </a>
+                <a href="https://t.me/share/url?url=${encodeURIComponent(state.shareableLink)}&text=Please%20complete%20the%20resident%20evaluation"
+                   class="flex items-center gap-2 px-4 py-2 bg-sky-100 text-sky-700 rounded-lg hover:bg-sky-200 text-sm" target="_blank">
+                  ✈️ Telegram
+                </a>
+              </div>
+            </div>
+
+            <div class="mt-4 p-3 bg-amber-50 rounded-lg border border-amber-200">
+              <p class="text-xs text-amber-800">
+                <strong>Note:</strong> For this link to work, the application must be hosted online. See the "Manage" tab for hosting instructions.
+              </p>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderManageTab() {
+      const currentUrl = getBaseUrl();
+
+      return `
+        <div class="space-y-6">
+          <div class="bg-white rounded-xl p-6 border">
+            <h3 class="text-lg font-semibold mb-4">Add New Resident</h3>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <input type="text" id="newResidentName" value="${escapeHtml(state.newResidentName)}" placeholder="Full Name" class="px-3 py-2 border rounded-lg focus:ring-2 focus:ring-emerald-500 focus:outline-none"/>
+              <select id="newResidentYear" class="px-3 py-2 border rounded-lg">
+                ${[1,2,3,4,5].map(y => `<option value="${y}" ${state.newResidentYear === y ? 'selected' : ''}>Year ${y}</option>`).join('')}
+              </select>
+              <button id="addResidentBtn" class="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50" ${state.isLoading ? 'disabled' : ''}>
+                Add Resident
+              </button>
+            </div>
+          </div>
+
+          <div class="bg-white rounded-xl p-6 border">
+            <h3 class="text-lg font-semibold mb-4">Database Status</h3>
+            <div class="grid grid-cols-2 md:grid-cols-5 gap-4">
+              <div class="p-4 bg-slate-50 rounded-lg text-center">
+                <p class="text-2xl font-bold text-emerald-600">${state.residents.length}</p>
+                <p class="text-sm text-slate-600">Active</p>
+              </div>
+              <div class="p-4 bg-slate-50 rounded-lg text-center">
+                <p class="text-2xl font-bold text-blue-600">${state.allResidents.filter(r => r.status === 'graduated').length}</p>
+                <p class="text-sm text-slate-600">Graduated</p>
+              </div>
+              <div class="p-4 bg-slate-50 rounded-lg text-center">
+                <p class="text-2xl font-bold text-red-600">${state.allResidents.filter(r => r.status === 'removed').length}</p>
+                <p class="text-sm text-slate-600">Removed</p>
+              </div>
+              <div class="p-4 bg-slate-50 rounded-lg text-center">
+                <p class="text-2xl font-bold text-purple-600">${state.evaluations.length}</p>
+                <p class="text-sm text-slate-600">Evaluations</p>
+              </div>
+              <div class="p-4 bg-slate-50 rounded-lg text-center">
+                <p class="text-2xl font-bold ${state.isConnected ? 'text-emerald-600' : 'text-red-600'}">${state.isConnected ? 'Online' : 'Offline'}</p>
+                <p class="text-sm text-slate-600">Status</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Hosting Instructions -->
+          <div class="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl p-6 border border-blue-200">
+            <h3 class="text-lg font-semibold mb-4 text-blue-800">🌐 How to Make This App Accessible Online</h3>
+            <p class="text-sm text-slate-700 mb-4">
+              To share evaluation links with evaluators via email, Messenger, Viber, etc., you need to host this application online. Here are free options:
+            </p>
+
+            <div class="space-y-4">
+              <div class="bg-white rounded-lg p-4 border">
+                <h4 class="font-semibold text-slate-800 mb-2">Option 1: GitHub Pages (Recommended - Free)</h4>
+                <ol class="text-sm text-slate-600 space-y-1 list-decimal list-inside">
+                  <li>Create a free account at <a href="https://github.com" target="_blank" class="text-blue-600 hover:underline">github.com</a></li>
+                  <li>Create a new repository named <code class="bg-slate-100 px-1 rounded">vsmmc-evaluation</code></li>
+                  <li>Upload <code class="bg-slate-100 px-1 rounded">VSMMC_Evaluation_v3.html</code> and rename it to <code class="bg-slate-100 px-1 rounded">index.html</code></li>
+                  <li>Upload the <code class="bg-slate-100 px-1 rounded">logo.jpg</code> file to the same repository</li>
+                  <li>Go to Settings → Pages → Select "main" branch → Save</li>
+                  <li>Your app will be available at: <code class="bg-slate-100 px-1 rounded">https://[username].github.io/vsmmc-evaluation</code></li>
+                </ol>
+              </div>
+
+              <div class="bg-white rounded-lg p-4 border">
+                <h4 class="font-semibold text-slate-800 mb-2">Option 2: Netlify (Free - Drag & Drop)</h4>
+                <ol class="text-sm text-slate-600 space-y-1 list-decimal list-inside">
+                  <li>Go to <a href="https://app.netlify.com/drop" target="_blank" class="text-blue-600 hover:underline">app.netlify.com/drop</a></li>
+                  <li>Create a folder with your HTML file (renamed to <code class="bg-slate-100 px-1 rounded">index.html</code>) and <code class="bg-slate-100 px-1 rounded">logo.jpg</code></li>
+                  <li>Drag and drop the folder to Netlify</li>
+                  <li>Get your free URL instantly!</li>
+                </ol>
+              </div>
+
+              <div class="bg-white rounded-lg p-4 border">
+                <h4 class="font-semibold text-slate-800 mb-2">Option 3: Vercel (Free)</h4>
+                <ol class="text-sm text-slate-600 space-y-1 list-decimal list-inside">
+                  <li>Go to <a href="https://vercel.com" target="_blank" class="text-blue-600 hover:underline">vercel.com</a> and sign up</li>
+                  <li>Click "New Project" and upload your files</li>
+                  <li>Deploy and get your URL</li>
+                </ol>
+              </div>
+            </div>
+
+            <div class="mt-4 p-3 bg-emerald-100 rounded-lg border border-emerald-200">
+              <p class="text-sm text-emerald-800">
+                <strong>✓ Multi-user Ready:</strong> Once hosted, multiple evaluators can access the app simultaneously from any device (Windows, Mac, iPhone, Android). All data is stored securely in the cloud database.
+              </p>
+            </div>
+          </div>
+
+          <!-- Data Backup Section -->
+          <div class="bg-white rounded-xl p-6 border">
+            <h3 class="text-lg font-semibold mb-4">📁 Data Backup & Export</h3>
+            <p class="text-sm text-slate-600 mb-4">Download your evaluation data for backup or external analysis.</p>
+            <div class="flex flex-wrap gap-3">
+              <button id="backupAllDataBtn" class="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 text-sm font-medium">
+                💾 Backup All Data (CSV)
+              </button>
+              <button id="exportResidentsBtn" class="px-4 py-2 bg-slate-100 text-slate-700 rounded-lg hover:bg-slate-200 text-sm font-medium">
+                👥 Export Residents
+              </button>
+              <button id="exportEvaluatorsBtn" class="px-4 py-2 bg-slate-100 text-slate-700 rounded-lg hover:bg-slate-200 text-sm font-medium">
+                👤 Export Evaluators
+              </button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function initializeCharts() {
+      // Year Level Chart
+      const yearLevelCtx = document.getElementById('yearLevelChart');
+      if (yearLevelCtx) {
+        const yearData = {};
+        state.residents.forEach(r => {
+          const stats = calculateResidentStats(r.id);
+          if (stats) {
+            if (!yearData[r.year_level]) yearData[r.year_level] = [];
+            yearData[r.year_level].push(stats.avgPercent);
+          }
+        });
+
+        const labels = [1,2,3,4,5].filter(y => yearData[y]);
+        const data = labels.map(y => yearData[y].reduce((a,b) => a+b, 0) / yearData[y].length);
+
+        createChart('yearLevelChart', yearLevelCtx, {
+          type: 'bar',
+          data: {
+            labels: labels.map(y => `Year ${y}`),
+            datasets: [{
+              label: 'Average Score %',
+              data: data,
+              backgroundColor: ['#10b981', '#3b82f6', '#8b5cf6', '#f59e0b', '#ef4444'],
+              borderRadius: 8
+            }]
+          },
+          options: {
+            responsive: true,
+            plugins: { legend: { display: false } },
+            scales: { y: { beginAtZero: true, max: 100 } }
+          }
+        });
+      }
+
+      // Competency Chart
+      const competencyCtx = document.getElementById('competencyChart');
+      if (competencyCtx) {
+        let clinicalSum = 0, technicalSum = 0, attitudinalSum = 0, count = 0;
+
+        state.residents.forEach(r => {
+          const stats = calculateResidentStats(r.id);
+          if (stats) {
+            clinicalSum += (stats.avgClinical / 42) * 100;
+            technicalSum += (stats.avgTechnical / 48) * 100;
+            attitudinalSum += (stats.avgAttitudinal / 48) * 100;
+            count++;
+          }
+        });
+
+        if (count > 0) {
+          createChart('competencyChart', competencyCtx, {
+            type: 'radar',
+            data: {
+              labels: ['Clinical', 'Technical', 'Attitudinal'],
+              datasets: [{
+                label: 'Program Average',
+                data: [clinicalSum/count, technicalSum/count, attitudinalSum/count],
+                backgroundColor: 'rgba(16, 185, 129, 0.2)',
+                borderColor: '#10b981',
+                pointBackgroundColor: '#10b981'
+              }]
+            },
+            options: {
+              responsive: true,
+              scales: { r: { beginAtZero: true, max: 100 } }
+            }
+          });
+        }
+      }
+    }
+
+    function attachEventListeners() {
+      // Login
+      document.getElementById('loginEmail')?.addEventListener('input', e => { state.loginEmail = e.target.value; });
+      document.getElementById('loginEmail')?.addEventListener('keydown', e => { if (e.key === 'Enter') handleLogin(); });
+      document.getElementById('loginName')?.addEventListener('input', e => { state.loginName = e.target.value; });
+      document.getElementById('loginName')?.addEventListener('keydown', e => { if (e.key === 'Enter') handleLogin(); });
+      document.getElementById('loginBtn')?.addEventListener('click', handleLogin);
+
+      // Main Navigation
+      document.getElementById('logoutBtn')?.addEventListener('click', () => { 
+        state.currentUser = null; 
+        resetForm();
+        render(); 
+      });
+      document.getElementById('refreshBtn')?.addEventListener('click', loadData);
+      document.getElementById('clearBtn')?.addEventListener('click', () => { resetForm(); render(); });
+      document.getElementById('submitBtn')?.addEventListener('click', handleSubmit);
+
+      // Back from resident detail
+      document.getElementById('backToResidents')?.addEventListener('click', () => {
+        state.viewingResident = null;
+        render();
+      });
+      document.getElementById('printSummaryBtn')?.addEventListener('click', () => window.print());
+
+      // Tabs
+      document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.addEventListener('click', () => { state.activeTab = btn.dataset.tab; render(); });
+      });
+
+      // Evaluation Type
+      document.querySelectorAll('.eval-type-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          state.evaluationType = btn.dataset.type;
+          state.scores = {};
+          const evalType = EVALUATION_TYPES.find(t => t.id === state.evaluationType);
+          state.openSections = { clinical: false, technical: false, attitudinal: false };
+          if (evalType.sections.length > 0) state.openSections[evalType.sections[0]] = true;
+          render();
+        });
+      });
+
+      // Evaluate Tab
+      document.getElementById('residentSelect')?.addEventListener('change', e => { state.selectedResident = e.target.value; render(); });
+      document.getElementById('quarterSelect')?.addEventListener('change', e => { state.selectedQuarter = e.target.value; });
+      document.getElementById('yearSelect')?.addEventListener('change', e => { state.selectedYear = parseInt(e.target.value); });
+      document.getElementById('commentsField')?.addEventListener('input', e => { state.comments = e.target.value; });
+
+      // Sections
+      document.querySelectorAll('.section-toggle').forEach(btn => {
+        btn.addEventListener('click', () => {
+          state.openSections[btn.dataset.section] = !state.openSections[btn.dataset.section];
+          render();
+        });
+      });
+
+      // Rubric toggles
+      document.querySelectorAll('.rubric-toggle').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          state.openRubrics[btn.dataset.criterion] = !state.openRubrics[btn.dataset.criterion];
+          render();
+        });
+      });
+
+      // Scores
+      document.querySelectorAll('.score-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          state.scores[btn.dataset.criterion] = parseInt(btn.dataset.score);
+          render();
+        });
+      });
+
+      // History Tab Filters
+      document.getElementById('filterYear')?.addEventListener('change', e => { state.filterYear = e.target.value; render(); });
+      document.getElementById('filterQuarter')?.addEventListener('change', e => { state.filterQuarter = e.target.value; render(); });
+
+      // Delete evaluation
+      document.querySelectorAll('.delete-eval-btn').forEach(btn => {
+        btn.addEventListener('click', () => deleteEvaluation(btn.dataset.id));
+      });
+
+      // Residents Tab Filters
+      document.getElementById('residentFilterYear')?.addEventListener('change', e => { state.residentFilterYear = e.target.value; render(); });
+      document.getElementById('residentFilterStatus')?.addEventListener('change', e => { state.residentFilterStatus = e.target.value; render(); });
+
+      // Resident Actions
+      document.querySelectorAll('.view-resident-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const resident = state.allResidents.find(r => r.id === btn.dataset.id);
+          if (resident) {
+            state.viewingResident = resident;
+            render();
+            // Initialize chart for resident detail
+            setTimeout(() => {
+              const chartCtx = document.getElementById('residentProgressChart');
+              if (chartCtx) {
+                const evals = getResidentEvaluations(resident.id).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+                const totalMax = calcTotalMax(EVAL_SECTIONS);
+                createChart('residentProgressChart', chartCtx, {
+                  type: 'line',
+                  data: {
+                    labels: evals.map(e => `${e.quarter} ${e.year}`),
+                    datasets: [{
+                      label: 'Overall %',
+                      data: evals.map(e => {
+                        const total = EVAL_SECTIONS.reduce((sum, s) => sum + calcSectionScore(e.scores || {}, s), 0);
+                        return (total / totalMax) * 100;
+                      }),
+                      borderColor: '#10b981',
+                      backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                      fill: true,
+                      tension: 0.3
+                    }]
+                  },
+                  options: {
+                    responsive: true,
+                    scales: { y: { beginAtZero: true, max: 100 } }
+                  }
+                });
+              }
+            }, 100);
+          }
+        });
+      });
+
+      document.querySelectorAll('.print-resident-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const resident = state.allResidents.find(r => r.id === btn.dataset.id);
+          if (resident) printResidentSummary(resident);
+        });
+      });
+
+      document.querySelectorAll('.promote-resident-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const resident = state.allResidents.find(r => r.id === btn.dataset.id);
+          if (resident) promoteResident(resident);
+        });
+      });
+
+      document.querySelectorAll('.graduate-resident-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const resident = state.allResidents.find(r => r.id === btn.dataset.id);
+          if (resident) graduateResident(resident);
+        });
+      });
+
+      document.querySelectorAll('.remove-resident-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const resident = state.allResidents.find(r => r.id === btn.dataset.id);
+          if (resident) removeResident(resident);
+        });
+      });
+
+      document.querySelectorAll('.reactivate-resident-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const resident = state.allResidents.find(r => r.id === btn.dataset.id);
+          if (resident) reactivateResident(resident);
+        });
+      });
+
+      // Manage Tab
+      document.getElementById('newResidentName')?.addEventListener('input', e => { state.newResidentName = e.target.value; });
+      document.getElementById('newResidentYear')?.addEventListener('change', e => { state.newResidentYear = parseInt(e.target.value); });
+      document.getElementById('addResidentBtn')?.addEventListener('click', addResident);
+
+      // Share Link Button
+      document.getElementById('shareLinkBtn')?.addEventListener('click', () => {
+        const link = generateShareableLink(state.selectedResident, state.selectedQuarter, state.selectedYear);
+        state.shareableLink = link;
+        state.shareLinkCopied = false;
+        state.showShareModal = true;
+        render();
+      });
+
+      // Share Modal Events
+      document.getElementById('closeShareModal')?.addEventListener('click', () => {
+        state.showShareModal = false;
+        render();
+      });
+
+      document.getElementById('copyLinkBtn')?.addEventListener('click', async () => {
+        await copyToClipboard(state.shareableLink);
+        state.shareLinkCopied = true;
+        render();
+        setTimeout(() => {
+          state.shareLinkCopied = false;
+          render();
+        }, 2000);
+      });
+
+      // Close modal when clicking outside
+      document.getElementById('shareModal')?.addEventListener('click', (e) => {
+        if (e.target.id === 'shareModal') {
+          state.showShareModal = false;
+          render();
+        }
+      });
+
+      // Analytics Tab Buttons
+      document.getElementById('printAnalyticsBtn')?.addEventListener('click', () => {
+        window.print();
+      });
+
+      document.getElementById('exportAnalyticsCSV')?.addEventListener('click', () => {
+        const data = generateAnalyticsReport();
+        const date = new Date().toISOString().split('T')[0];
+        exportToCSV(data, `VSMMC_Analytics_Report_${date}.csv`);
+      });
+
+      document.getElementById('exportEvaluationsCSV')?.addEventListener('click', () => {
+        const data = generateEvaluationsExport();
+        const date = new Date().toISOString().split('T')[0];
+        exportToCSV(data, `VSMMC_All_Evaluations_${date}.csv`);
+      });
+
+      // Manage Tab - Data Export Buttons
+      document.getElementById('backupAllDataBtn')?.addEventListener('click', () => {
+        const data = generateEvaluationsExport();
+        const date = new Date().toISOString().split('T')[0];
+        exportToCSV(data, `VSMMC_Full_Backup_${date}.csv`);
+      });
+
+      document.getElementById('exportResidentsBtn')?.addEventListener('click', () => {
+        const data = state.allResidents.map(r => ({
+          'ID': r.id,
+          'Name': r.name,
+          'Year Level': r.year_level,
+          'Status': r.status,
+          'Created At': r.created_at
+        }));
+        const date = new Date().toISOString().split('T')[0];
+        exportToCSV(data, `VSMMC_Residents_${date}.csv`);
+      });
+
+      document.getElementById('exportEvaluatorsBtn')?.addEventListener('click', () => {
+        const data = state.evaluators.map(e => ({
+          'ID': e.id,
+          'Name': e.name,
+          'Email': e.email,
+          'Role': e.role,
+          'Created At': e.created_at
+        }));
+        const date = new Date().toISOString().split('T')[0];
+        exportToCSV(data, `VSMMC_Evaluators_${date}.csv`);
+      });
+    }
+
+    // ==================== INIT ====================
+    // Check for URL parameters (deep linking from shared links)
+    function handleUrlParams() {
+      const params = getUrlParams();
+      if (params.action === 'evaluate') {
+        // Pre-fill form from URL parameters
+        if (params.residentId) state.selectedResident = params.residentId;
+        if (params.quarter) state.selectedQuarter = params.quarter;
+        if (params.year) state.selectedYear = parseInt(params.year);
+        state.activeTab = 'evaluate';
+      }
+    }
+
+    // Initialize app
+    async function initApp() {
+      await loadData();
+      handleUrlParams();
+      render();
+    }
+
+    initApp();
+  </script>
+</body>
+</html>
